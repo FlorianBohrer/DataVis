@@ -57,9 +57,8 @@ def filter_empty(entry):
     arr = entry["audio"]["array"]
     if arr is None or len(arr) == 0:
         return False
-    if np.all(arr == 0):
-        return False
-    return True
+    rms = np.sqrt(np.mean(arr**2)) #rms measures the energy in the signal. very little rms-value -> silence
+    return rms > 1e-4
     
 
 def filter_unlabeled(entry):
@@ -81,21 +80,35 @@ def extract_features(entry):
     arr = entry["audio"]["array"]
     sr = entry["audio"]["sampling_rate"]
 
-    mfcc = librosa.feature.mfcc(y=arr, sr=sr, n_mfcc=13)
+    mfcc = librosa.feature.mfcc(y=arr, sr=sr, n_mfcc=n_mfcc)
+    mfcc_mean = mfcc.mean(axis=1)
+    mfcc_var = mfcc.var(axis=1)
+
+    features = [*mfcc_mean, *mfcc_var]
+
+    contrast = librosa.feature.spectral_contrast(y=arr, sr=sr)
+    features.extend(list(contrast.mean(axis=1)))
+    features.extend(list(contrast.var(axis=1)))
+
     rms = librosa.feature.rms(y=arr)[0]
     zcr = librosa.feature.zero_crossing_rate(arr)[0]
-    contrast = librosa.feature.spectral_contrast(y=arr, sr=sr)
+    features.extend([np.mean(rms), np.var(rms), np.var(zcr)])
 
-    return np.concatenate([
-        mfcc.mean(axis=1), mfcc.var(axis=1),
-        contrast.mean(axis=1), contrast.var(axis=1),
-        [np.mean(rms), np.var(rms), np.mean(zcr), np.var(zcr)]
+    if use_extra:
+        centroid = librosa.feature.spectral_centroid(y=arr, sr=sr)[0]
+        rolloff = librosa.feature.spectral_rolloff(y=arr, sr=sr)[0]
+        bandwith = librosa.feature.spectral_bandwidth(y=arr, sr=sr)[0]
+        features.extend([
+            np.mean(centroid), np.var(centroid),
+            np.mean(rolloff), np.var(rolloff),
+            np.mean(bandwidth), np.var(bandwith),
     ])
+        return np.array(features)
 
-def extract_all_features(dataset):
+def extract_all_features(dataset, n_mfcc=13, use_extra=True):
     X, y = [], []
     for entry in tqdm(dataset, total=len(dataset)):
-        X.append(extract_features(entry))
+        X.append(extract_features(entry, n_mfcc=n_mfcc, use_extra=use_extra))
         y.append(entry["genre"])
     return np.array(X), np.array(y)
 
