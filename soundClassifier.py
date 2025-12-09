@@ -14,11 +14,20 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 
 
+from sklearn.decomposition import PCA
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import classification_report
+from sklearn.ensemble import RandomForestClassifier
+
+
 # --------------------------------------------------------------
 # Settings
 # --------------------------------------------------------------
 
 os.environ["HF_DATASETS_OFFLINE"] = "1"
+n_mfcc = 12 #amount of extracted MFCCs
+use_extra = True #enables extraction of additional features
+bandwidth = 2000 #parameter for spectral bandwitdh
 
 
 # --------------------------------------------------------------
@@ -76,39 +85,53 @@ def clean_dataset(dataset):
 # Feature extraction
 # --------------------------------------------------------------
 
-def extract_features(entry):
-    arr = entry["audio"]["array"]
+#with mean and maxima we can detect the dynamic of the soundsignal over time
+
+def extract_features(entry, n_mfcc, use_extra, bandwith=None):
+    y = entry["audio"]["array"]
     sr = entry["audio"]["sampling_rate"]
+    features = []
 
-    mfcc = librosa.feature.mfcc(y=arr, sr=sr, n_mfcc=n_mfcc)
-    mfcc_mean = mfcc.mean(axis=1)
-    mfcc_var = mfcc.var(axis=1)
+    features = []
+    
+    # ZCR
+    zcr = librosa.feature.zero_crossing_rate(y)
+    features.extend([np.mean(zcr), np.std(zcr), np.max(zcr)]) # NEU: std und max
 
-    features = [*mfcc_mean, *mfcc_var]
+    # Spectral Centroid
+    spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+    features.extend([np.mean(spectral_centroid), np.std(spectral_centroid), np.max(spectral_centroid)]) # NEU: std und max
 
-    contrast = librosa.feature.spectral_contrast(y=arr, sr=sr)
-    features.extend(list(contrast.mean(axis=1)))
-    features.extend(list(contrast.var(axis=1)))
+    # Spectral Rolloff
+    rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
+    features.extend([np.mean(rolloff), np.std(rolloff), np.max(rolloff)]) # NEU: std und max
 
-    rms = librosa.feature.rms(y=arr)[0]
-    zcr = librosa.feature.zero_crossing_rate(arr)[0]
-    features.extend([np.mean(rms), np.var(rms), np.var(zcr)])
+    # Chroma Frequencies
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+    features.extend([np.mean(chroma), np.std(chroma), np.max(chroma)]) # NEU: std und max
 
+    # MFCCs
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
+    # insert mean (done in baseline) and std and max for every MFCCs 
+    for i in range(n_mfcc):
+        features.extend([np.mean(mfcc[i]), np.std(mfcc[i]), np.max(mfcc[i])])
+    
+    # OPTIONAL: add Spectral Bandwidth/RMS Energy , if use_extra is True 
     if use_extra:
-        centroid = librosa.feature.spectral_centroid(y=arr, sr=sr)[0]
-        rolloff = librosa.feature.spectral_rolloff(y=arr, sr=sr)[0]
-        bandwith = librosa.feature.spectral_bandwidth(y=arr, sr=sr)[0]
-        features.extend([
-            np.mean(centroid), np.var(centroid),
-            np.mean(rolloff), np.var(rolloff),
-            np.mean(bandwidth), np.var(bandwith),
-    ])
-        return np.array(features)
+        # Spectral Bandwidth
+        spec_bw = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+        features.extend([np.mean(spec_bw), np.std(spec_bw)]) # Hier nur mean/std
+        
+        # RMS Energy
+        rms = librosa.feature.rms(y=y)
+        features.extend([np.mean(rms), np.std(rms), np.max(rms)])
+        
+    return features
 
 def extract_all_features(dataset, n_mfcc=13, use_extra=True):
     X, y = [], []
-    for entry in tqdm(dataset, total=len(dataset)):
-        X.append(extract_features(entry, n_mfcc=n_mfcc, use_extra=use_extra))
+    for entry in tqdm(dataset, desc="Feature extraction"):
+        X.append(extract_features(entry, n_mfcc=n_mfcc, use_extra=use_extra, bandwith=bandwidth))
         y.append(entry["genre"])
     return np.array(X), np.array(y)
 
@@ -126,6 +149,7 @@ def train_svm_model(X_train, y_train):
     model = SVC(kernel="rbf", C=10, gamma="scale")
     model.fit(X_train, y_train)
     return model
+
 
 def evaluate_model(model, X_test, y_test, labels, title):
     pred = model.predict(X_test)
@@ -154,9 +178,15 @@ if __name__ == "__main__":
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
+    #adding dimensionreduction (PCA)
+    print("Applying PCA...")
+    pca = PCA(n_components=0.95)
+    X_reduced = pca.fit_transform(X_scaled)
+    print(f"Features reduced from {X_scaled.shape[1]} to {X_reduced.shape[1]} dimensions")
+
     print("Splitting data..")
     X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=0.2, random_state=42
+        X_reduced, y, test_size=0.2, random_state=42
     )
 
     labels = dataset.features["genre"].names
